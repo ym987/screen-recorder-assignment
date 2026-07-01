@@ -80,13 +80,13 @@ export function createServer(dataDir: string) {
   });
 
   // --- Resume session --------------------------------------------------------
-  app.post("/sessions/:sessionId/resume", (req: Request, res: Response) => {
+  app.post("/sessions/:sessionId/resume", async (req: Request, res: Response) => {
     try {
       const body = req.body as ResumeSessionRequest;
       if (typeof body?.lastKnownSegmentIndex !== "number") {
         throw new ProtocolError("BAD_REQUEST", "lastKnownSegmentIndex is required");
       }
-      const result = store.resumeSession(req.params.sessionId);
+      const result = await store.resumeSession(req.params.sessionId);
       log("resumeSession", { sessionId: req.params.sessionId, resumable: result.resumable });
       res.status(200).json({ ...envelope(), ...result });
     } catch (err) {
@@ -142,13 +142,13 @@ export function createServer(dataDir: string) {
   );
 
   // --- Complete session ------------------------------------------------------
-  app.post("/sessions/:sessionId/complete", (req: Request, res: Response) => {
+  app.post("/sessions/:sessionId/complete", async (req: Request, res: Response) => {
     try {
       const body = req.body as CompleteSessionRequest;
       if (!body?.idempotencyKey) {
         throw new ProtocolError("BAD_REQUEST", "idempotencyKey is required");
       }
-      const summary = store.completeSession(
+      const summary = await store.completeSession(
         req.params.sessionId,
         body.expectedLastSegmentIndex,
         body.expectedLastChunkIndexBySegment ?? {},

@@ -105,7 +105,7 @@ describe("integration: record + upload", () => {
     expect(second.ack.duplicate).toBe(true);
   });
 
-  it("out-of-order chunk is rejected as retryable", async () => {
+  it("out-of-order chunk is rejected as non-retryable", async () => {
     const api = new ApiClient(baseUrl);
     const uploader = new ChunkUploader({ baseUrl, sleep: noSleep });
     const session = await api.startSession("client-4", ["audio/webm"]);
@@ -113,7 +113,7 @@ describe("integration: record + upload", () => {
     const c1 = chunk(session.sessionId, 0, 1, "chunk-1");
     await expect(uploader.attempt(c1.meta, c1.blob)).rejects.toMatchObject({
       code: "OUT_OF_ORDER_CHUNK",
-      retryable: true,
+      retryable: false,
     });
   });
 
@@ -195,7 +195,7 @@ describe("integration: record + upload", () => {
     const badMeta = { ...c.meta, checksum: "0".repeat(64) };
     await expect(uploader.attempt(badMeta, c.blob)).rejects.toMatchObject({
       code: "CHECKSUM_MISMATCH",
-      retryable: true,
+      retryable: false,
     });
   });
 

@@ -128,7 +128,7 @@ export class SessionStore {
     return session;
   }
 
-  resumeSession(sessionId: string): { session: SessionModel; checkpoint: CheckpointModel; resumable: boolean } {
+  async resumeSession(sessionId: string): Promise<{ session: SessionModel; checkpoint: CheckpointModel; resumable: boolean }> {
     const rec = this.getRecordOrThrow(sessionId);
     const status = this.refreshStatus(rec);
 
@@ -142,6 +142,8 @@ export class SessionStore {
     // Resuming keeps same sessionId; recording continues under a new segment.
     rec.session.status = "active";
     rec.session.interruptedAt = null;
+    // Persist the revived status so a crash right after resume can't lose it.
+    await this.persistSession(rec);
 
     return {
       session: rec.session,
@@ -233,12 +235,12 @@ export class SessionStore {
     };
   }
 
-  completeSession(
+  async completeSession(
     sessionId: string,
     expectedLastSegmentIndex: number,
     expectedLastChunkIndexBySegment: Record<string, number>,
     idempotencyKey: string,
-  ): CompleteSummary {
+  ): Promise<CompleteSummary> {
     const rec = this.getRecordOrThrow(sessionId);
     this.refreshStatus(rec);
 
@@ -278,7 +280,8 @@ export class SessionStore {
       missingChunks,
     };
     rec.completeResults[idempotencyKey] = summary;
-    void this.persistSession(rec).catch(() => undefined);
+    // Await the write so the completed status is durable before we return it.
+    await this.persistSession(rec);
     return summary;
   }
 

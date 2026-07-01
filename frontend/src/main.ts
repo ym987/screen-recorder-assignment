@@ -5,7 +5,7 @@ import { makeIdempotencyKey, type CheckpointModel } from "../../shared/contract.
 import { ApiClient } from "./api-client.js";
 import { ChunkUploader } from "./chunk-uploader.js";
 import { Idb, type LocalSessionState } from "./idb.js";
-import { RecordingController, type CaptureMode, type CreatedChunk } from "./recording-controller.js";
+import { RecordingController, type CreatedChunk } from "./recording-controller.js";
 import { Store } from "./state/store.js";
 import { evaluatePressure } from "./storage-guard.js";
 import { UploadQueue } from "./upload-queue.js";
@@ -44,19 +44,21 @@ const queue = new UploadQueue(idb, uploader, store, {
 let recorder: RecordingController;
 let currentSessionId: string | null = null;
 let currentSegmentIndex = 0;
-let currentCaptureMode: CaptureMode = "screen";
 const lastChunkIndexBySegment: Record<string, number> = {};
 let recorderPausedForStorage = false;
+
+// Screen capture always produces WebM video; offer the codecs in preference order.
+const DISPLAY_MIME_PREFERENCE = [
+  "video/webm;codecs=vp9,opus",
+  "video/webm;codecs=vp8,opus",
+  "video/webm",
+];
 
 // ---------------------------------------------------------------------------
 // DOM
 // ---------------------------------------------------------------------------
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
-
-function mimePreferenceFor(_mode: CaptureMode): string[] {
-  return ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
-}
 
 function setButtons(startEnabled: boolean, stopEnabled: boolean): void {
   ($("btnStart") as HTMLButtonElement).disabled = !startEnabled;
@@ -144,19 +146,17 @@ async function applyStoragePressure(): Promise<void> {
 async function handleStart(): Promise<void> {
   setButtons(false, false);
   try {
-    const captureMode: CaptureMode = "screen";
-    currentCaptureMode = captureMode;
-    log("handleStart", { captureMode });
+    log("handleStart");
     const local = await idb.getSession();
     if (local) {
       const resumed = await tryResume(local);
-      if (!resumed) await startFreshSession(captureMode);
+      if (!resumed) await startFreshSession();
     } else {
-      await startFreshSession(captureMode);
+      await startFreshSession();
     }
 
     store.transition("recording");
-    const mime = await recorder.start(currentSessionId!, currentSegmentIndex, 0, captureMode);
+    const mime = await recorder.start(currentSessionId!, currentSegmentIndex, 0);
     store.update(
       { sessionId: currentSessionId, segmentIndex: currentSegmentIndex, message: `מקליט (${mime})` },
       "record_started",
@@ -171,8 +171,8 @@ async function handleStart(): Promise<void> {
   }
 }
 
-async function startFreshSession(captureMode: CaptureMode = "screen"): Promise<void> {
-  const session = await api.startSession(CLIENT_ID, mimePreferenceFor(captureMode));
+async function startFreshSession(): Promise<void> {
+  const session = await api.startSession(CLIENT_ID, DISPLAY_MIME_PREFERENCE);
   currentSessionId = session.sessionId;
   currentSegmentIndex = 0;
   for (const k of Object.keys(lastChunkIndexBySegment)) delete lastChunkIndexBySegment[k];
@@ -407,24 +407,10 @@ function boot(): void {
   setButtons(true, false);
   setNewButton(false);
 
-  // Persist the in-progress recording tail if the page is hidden or closed, so
-  // the audio buffered since the last 30s boundary isn't lost on reload/close.
-  // visibilitychange (hidden) / pagehide fire before the page is destroyed and
-  // give IndexedDB the best chance to finish the write (best-effort). flushTail()
-  // skips checksum so the write is short enough to actually complete in time.
-  document.addEventListener("visibilitychange", () => {
-    // In screen-capture mode the recorder tab is normally hidden (the user is
-    // looking at the shared surface), so a hide is NOT a sign the page is about
-    // to be destroyed -- flushing here would emit a spurious near-empty chunk at
-    // the very start. Real page teardown is still covered by "pagehide" below.
-    if (
-      document.visibilityState === "hidden" &&
-      recorder?.isRecording &&
-      currentCaptureMode !== "screen"
-    ) {
-      recorder.flushTail();
-    }
-  });
+  // Persist the in-progress recording tail if the page is closed while recording,
+  // so the video buffered since the last 30s boundary isn't lost on reload/close.
+  // pagehide fires before the page is destroyed; flushTailForUnload() skips the
+  // checksum so the durable IndexedDB write is short enough to actually complete.
   window.addEventListener("pagehide", () => {
     if (recorder?.isRecording) recorder.flushTailForUnload();
   });

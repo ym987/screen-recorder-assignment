@@ -14,14 +14,6 @@ export interface CreatedChunk {
   checksumPending?: boolean;
 }
 
-/**
- * What the user wants to capture:
- * - "screen": a tab / window / screen (with its audio when available), via
- *   getDisplayMedia. The browser's own picker lets the user choose which
- *   tab, window or the whole screen to share.
- */
-export type CaptureMode = "screen";
-
 export interface RecordingControllerOptions {
   intervalMs?: number;
   displayMimePreference?: string[];
@@ -77,7 +69,7 @@ export class RecordingController {
   private sessionId = "";
   private segmentIndex = 0;
   private chunkIndex = 0;
-  private mimeType = "audio/webm";
+  private mimeType = "video/webm";
   private chunkStartedAt = 0;
 
   constructor(opts: RecordingControllerOptions) {
@@ -113,14 +105,13 @@ export class RecordingController {
     sessionId: string,
     segmentIndex: number,
     startChunkIndex = 0,
-    captureMode: CaptureMode = "screen",
   ): Promise<string> {
     this.sessionId = sessionId;
     this.segmentIndex = segmentIndex;
     this.chunkIndex = startChunkIndex;
 
     const preference = this.displayMimePreference;
-    this.stream = await this.acquireStream(captureMode);
+    this.stream = await this.acquireStream();
     this.mimeType = pickMimeType(preference);
 
     // When the user ends the screen share from the browser's own control, the
@@ -137,7 +128,7 @@ export class RecordingController {
     return this.mimeType;
   }
 
-  private async acquireStream(_captureMode: CaptureMode): Promise<MediaStream> {
+  private async acquireStream(): Promise<MediaStream> {
     // The browser picker lets the user choose a tab, a window or the whole
     // screen, and (where supported) share that source's audio too.
     return navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
@@ -215,33 +206,12 @@ export class RecordingController {
   }
 
   /**
-   * Force-close the current chunk into a complete, standalone file and keep
-   * recording. Used to persist the in-progress tail before the page is
-   * hidden/unloaded so it survives a reload or accidental close.
-   */
-  flush(): void {
-    this.rollChunk();
-  }
-
-  /**
-   * Emergency variant of {@link flush} for the page-hide/unload path: closes the
-   * current chunk into a complete file but skips checksum computation so the
-   * durable write finishes in the tiny window the browser gives before
-   * destroying the page. The checksum is filled in later, on recovery.
-   */
-  flushTail(): void {
-    if (this.recorder && this.recorder.state === "recording") {
-      this.tailFast = true;
-      this.recorder.stop();
-    }
-  }
-
-  /**
-   * Final best-effort tail flush for reload/close.
+   * Best-effort tail flush for reload/close.
    *
-   * Unlike regular flushTail(), this avoids any follow-up chunk scheduling,
-   * which keeps the unload path shorter and improves the chance the durable
-   * write finishes before the page is destroyed.
+   * Closes the current chunk into a complete file but skips checksum
+   * computation (deferred to recovery) and avoids scheduling any follow-up
+   * chunk, keeping the unload path short so the durable IndexedDB write has the
+   * best chance to finish before the page is destroyed.
    */
   flushTailForUnload(): void {
     this.unloading = true;

@@ -37,12 +37,21 @@ export interface ErrorCodeSpec {
 }
 
 // Fixed mapping of server error codes -> HTTP status + retryable flag.
+//
+// OUT_OF_ORDER_CHUNK and CHECKSUM_MISMATCH are deliberately non-retryable:
+// the client uploads a single session strictly serially in FIFO order, so
+// - a checksum mismatch means the exact bytes hashed locally disagree with the
+//   bytes the server hashed; re-sending the identical blob is futile, and
+// - an out-of-order chunk can only appear when an earlier chunk in the segment
+//   failed permanently (a gap), which a retry can never fill.
+// Marking them retryable would just burn the whole backoff budget and trip the
+// circuit breaker; failing fast surfaces the real problem immediately.
 export const ERROR_CODES: Record<ServerErrorCode, ErrorCodeSpec> = {
   SESSION_NOT_FOUND: { httpStatus: 404, retryable: false },
   SESSION_EXPIRED: { httpStatus: 410, retryable: false },
   SESSION_NOT_RESUMABLE: { httpStatus: 409, retryable: false },
-  OUT_OF_ORDER_CHUNK: { httpStatus: 409, retryable: true },
-  CHECKSUM_MISMATCH: { httpStatus: 422, retryable: true },
+  OUT_OF_ORDER_CHUNK: { httpStatus: 409, retryable: false },
+  CHECKSUM_MISMATCH: { httpStatus: 422, retryable: false },
   PAYLOAD_TOO_LARGE: { httpStatus: 413, retryable: false },
   RATE_LIMITED: { httpStatus: 429, retryable: true },
   INTERNAL_UPLOAD_ERROR: { httpStatus: 500, retryable: true },

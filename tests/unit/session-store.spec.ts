@@ -79,7 +79,7 @@ describe("SessionStore protocol", () => {
     const s = await store.startSession();
     const c0 = makeChunk(s.sessionId, 0, 0, "chunk-0");
     await store.acceptChunk(s.sessionId, c0.meta, c0.blob);
-    const { checkpoint, resumable } = store.resumeSession(s.sessionId);
+    const { checkpoint, resumable } = await store.resumeSession(s.sessionId);
     expect(resumable).toBe(true);
     expect(checkpoint.lastAcceptedSegmentIndex).toBe(0);
     // next recording segment should be 1
@@ -97,8 +97,8 @@ describe("SessionStore protocol", () => {
     });
   });
 
-  it("throws SESSION_NOT_FOUND when resuming an unknown session", () => {
-    expect(() => store.resumeSession(randomUUID())).toThrow(ProtocolError);
+  it("throws SESSION_NOT_FOUND when resuming an unknown session", async () => {
+    await expect(store.resumeSession(randomUUID())).rejects.toBeInstanceOf(ProtocolError);
   });
 
   it("handles multiple segments independently", async () => {
@@ -123,12 +123,12 @@ describe("SessionStore protocol", () => {
     await store.acceptChunk(s.sessionId, c0.meta, c0.blob);
 
     // expect 2 chunks in segment 0 but only chunk 0 was uploaded
-    const summary = store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:x");
+    const summary = await store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:x");
     expect(summary.status).toBe("completed_with_segments");
     expect(summary.missingChunks).toEqual([{ segmentIndex: 0, chunkIndex: 1 }]);
 
     // idempotent: same key returns cached summary
-    const again = store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:x");
+    const again = await store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:x");
     expect(again).toEqual(summary);
   });
 
@@ -138,7 +138,7 @@ describe("SessionStore protocol", () => {
       const c = makeChunk(s.sessionId, 0, i, `c${i}`);
       await store.acceptChunk(s.sessionId, c.meta, c.blob);
     }
-    const summary = store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:y");
+    const summary = await store.completeSession(s.sessionId, 0, { "0": 1 }, "complete:y");
     expect(summary.status).toBe("completed");
     expect(summary.missingChunks).toHaveLength(0);
     expect(summary.receivedChunksTotal).toBe(2);

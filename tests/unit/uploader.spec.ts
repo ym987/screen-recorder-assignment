@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CHECKSUM_ALGO, type ChunkMetadata } from "../../shared/contract.js";
+import { CHECKSUM_ALGO, ERROR_CODES, type ChunkMetadata } from "../../shared/contract.js";
 import { ChunkUploader, UploadError } from "../../frontend/src/chunk-uploader.js";
 
 function meta(): ChunkMetadata {
@@ -92,27 +92,23 @@ describe("ChunkUploader", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(8);
   });
 
-  it("does NOT resend an out-of-order chunk forever: retries are bounded then fail", async () => {
-    // A persistent OUT_OF_ORDER_CHUNK (retryable) must not loop indefinitely.
-    // The uploader retries the SAME chunk a bounded number of times and gives up;
-    // it never reorders or resends beyond maxRetriesPerChunk.
-    const fetchImpl = vi.fn(async () => errorResponse(409, "OUT_OF_ORDER_CHUNK", true));
-    const up = new ChunkUploader({ baseUrl: "http://x", fetchImpl: fetchImpl as never, sleep: noSleep });
+  it("fails fast on non-retryable protocol errors (out-of-order / checksum): a single attempt", async () => {
+    // Per the contract these are non-retryable: resending the identical chunk is
+    // futile (a checksum mismatch stays mismatched; an out-of-order gap can't be
+    // filled by a retry), so the uploader must give up after ONE attempt instead
+    // of burning the whole backoff budget and tripping the circuit breaker.
+    for (const code of ["OUT_OF_ORDER_CHUNK", "CHECKSUM_MISMATCH"] as const) {
+      const spec = ERROR_CODES[code];
+      expect(spec.retryable).toBe(false); // guard: contract keeps these non-retryable
+      const fetchImpl = vi.fn(async () => errorResponse(spec.httpStatus, code, spec.retryable));
+      const up = new ChunkUploader({ baseUrl: "http://x", fetchImpl: fetchImpl as never, sleep: noSleep });
 
-    let err: UploadError | undefined;
-    try {
-      await up.upload(meta(), new Blob(["abc"]));
-    } catch (e) {
-      err = e as UploadError;
-    }
-    expect(err).toBeInstanceOf(UploadError);
-    expect(err?.code).toBe("OUT_OF_ORDER_CHUNK");
-    // Bounded: 1 initial + 7 retries = 8 attempts, then it stops (no infinite loop).
-    expect(fetchImpl).toHaveBeenCalledTimes(8);
-    // Every attempt targeted the exact same chunkIndex (no silent reordering).
-    for (const call of fetchImpl.mock.calls) {
-      const form = (call as unknown as [string, { body: FormData }])[1].body;
-      expect(JSON.parse(form.get("meta") as string).chunkIndex).toBe(0);
+      await expect(up.upload(meta(), new Blob(["abc"]))).rejects.toMatchObject({
+        code,
+        retryable: false,
+      });
+      // No resend: exactly one attempt for the whole upload.
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
     }
   });
 

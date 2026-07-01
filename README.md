@@ -1,13 +1,14 @@
-# Audio Chunk Upload
+# Screen Chunk Upload
 
-An MVP system for recording audio and uploading it to a server in **30-second chunks**, with
+An MVP system for recording the screen and uploading it to a server in **30-second chunks**, with
 **Retry**, **Resume**, and **Idempotency** mechanisms for high network resilience. The client is
 written in Vanilla TypeScript (no framework) and the server is a Mock Server based on
 Node/Express for protocol validation.
 
 ## Key Features
 
-- **Continuous recording** – `MediaRecorder` produces a chunk every 30 seconds.
+- **Continuous recording** – `MediaRecorder` (screen capture via `getDisplayMedia`) produces a
+  chunk every 30 seconds.
 - **Persistent upload queue** – The queue is stored in IndexedDB (Blob + metadata + checkpoint),
   so page refreshes or network drops do not lose data.
 - **Exponential retry** – backoff `1s, 2s, 4s, 8s, 16s`, up to 7 attempts per chunk,
