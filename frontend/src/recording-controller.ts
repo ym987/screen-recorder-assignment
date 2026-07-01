@@ -78,6 +78,9 @@ export class RecordingController {
   // recorder.state, which flips to "inactive" between chunks) is the source of
   // truth for "are we recording".
   private active = false;
+  // Set when the page is being torn down (reload/close). In this mode we do
+  // a one-shot final flush and avoid scheduling any new recorders/timers.
+  private unloading = false;
   private chunkTimer: ReturnType<typeof setInterval> | null = null;
 
   private sessionId = "";
@@ -159,7 +162,7 @@ export class RecordingController {
    * chains into the next chunk's recorder for near-continuous capture.
    */
   private startChunkRecorder(): void {
-    if (!this.stream) return;
+    if (!this.stream || this.unloading) return;
     const recorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
     this.chunkStartedAt = Date.now();
 
@@ -176,7 +179,7 @@ export class RecordingController {
     };
     recorder.onstop = () => {
       // Chain into the next standalone chunk unless the session has stopped.
-      if (this.active) this.startChunkRecorder();
+      if (this.active && !this.unloading) this.startChunkRecorder();
     };
     recorder.onerror = (ev: Event) => {
       const err = (ev as unknown as { error?: Error }).error ?? new Error("MediaRecorder error");
@@ -246,9 +249,30 @@ export class RecordingController {
     }
   }
 
+  /**
+   * Final best-effort tail flush for reload/close.
+   *
+   * Unlike regular flushTail(), this avoids any follow-up chunk scheduling,
+   * which keeps the unload path shorter and improves the chance the durable
+   * write finishes before the page is destroyed.
+   */
+  flushTailForUnload(): void {
+    this.unloading = true;
+    this.active = false;
+    if (this.chunkTimer) {
+      clearInterval(this.chunkTimer);
+      this.chunkTimer = null;
+    }
+    if (this.recorder && this.recorder.state === "recording") {
+      this.tailFast = true;
+      this.recorder.stop();
+    }
+  }
+
   /** Stop recording and flush the final chunk. Resolves after last chunk emitted. */
   async stop(): Promise<void> {
     // Prevent the onstop handler from chaining into a new chunk recorder.
+    this.unloading = false;
     this.active = false;
     if (this.chunkTimer) {
       clearInterval(this.chunkTimer);
@@ -280,6 +304,7 @@ export class RecordingController {
   }
 
   private teardown(): void {
+    this.unloading = false;
     this.active = false;
     if (this.chunkTimer) {
       clearInterval(this.chunkTimer);

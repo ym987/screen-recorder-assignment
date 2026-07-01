@@ -436,11 +436,13 @@ function boot(): void {
     }
   });
   window.addEventListener("pagehide", () => {
-    if (recorder?.isRecording) recorder.flushTail();
+    if (recorder?.isRecording) recorder.flushTailForUnload();
   });
   // Guard against an accidental reload/close while recording is active.
   window.addEventListener("beforeunload", (e) => {
     if (recorder?.isRecording) {
+      // Start the tail flush as early as possible in the unload path.
+      recorder.flushTailForUnload();
       e.preventDefault();
       e.returnValue = "";
     }
