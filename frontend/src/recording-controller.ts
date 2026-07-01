@@ -6,6 +6,12 @@ import { sha256Hex } from "./checksum.js";
 export interface CreatedChunk {
   meta: ChunkMetadata;
   blob: Blob;
+  /**
+   * True when this chunk was emitted via the fast emergency tail-flush and its
+   * checksum was deliberately not computed yet (to keep the unload-time write
+   * short). The checksum is filled in later, before upload.
+   */
+  checksumPending?: boolean;
 }
 
 /**
@@ -63,6 +69,10 @@ export class RecordingController {
   // Tracks in-flight chunk pipelines so stop() can await the final flush.
   private pendingEmits = new Set<Promise<void>>();
 
+  // One-shot flag: the next emitted chunk is an emergency tail flush and should
+  // skip checksum computation to keep the unload-time persistence path short.
+  private tailFast = false;
+
   private sessionId = "";
   private segmentIndex = 0;
   private chunkIndex = 0;
@@ -110,7 +120,9 @@ export class RecordingController {
 
     this.recorder.ondataavailable = (ev: BlobEvent) => {
       if (ev.data && ev.data.size > 0) {
-        const p = this.emitChunk(ev.data, mimeType).finally(() => {
+        const fast = this.tailFast;
+        this.tailFast = false;
+        const p = this.emitChunk(ev.data, mimeType, fast).finally(() => {
           this.pendingEmits.delete(p);
         });
         this.pendingEmits.add(p);
@@ -134,10 +146,16 @@ export class RecordingController {
     return navigator.mediaDevices.getUserMedia({ audio: true });
   }
 
-  private async emitChunk(blob: Blob, mimeType: string): Promise<void> {
+  private async emitChunk(blob: Blob, mimeType: string, fast = false): Promise<void> {
     const index = this.chunkIndex++;
-    const buf = await blob.arrayBuffer();
-    const checksum = await sha256Hex(buf);
+    // Emergency tail flush: skip the (async, CPU-heavy) checksum so the durable
+    // write to IndexedDB is as short as possible before the page is destroyed.
+    // The checksum is computed later, on recovery, before the chunk is uploaded.
+    let checksum = "";
+    if (!fast) {
+      const buf = await blob.arrayBuffer();
+      checksum = await sha256Hex(buf);
+    }
     const startedAt = new Date(this.segmentStartedAt + index * this.intervalMs).toISOString();
     const meta: ChunkMetadata = {
       sessionId: this.sessionId,
@@ -152,7 +170,7 @@ export class RecordingController {
       checksum,
       idempotencyKey: makeIdempotencyKey(this.sessionId, this.segmentIndex, index),
     };
-    await this.onChunk({ meta, blob });
+    await this.onChunk({ meta, blob, checksumPending: fast });
   }
 
   /**
@@ -162,6 +180,19 @@ export class RecordingController {
    */
   flush(): void {
     if (this.recorder && this.recorder.state === "recording") {
+      this.recorder.requestData();
+    }
+  }
+
+  /**
+   * Emergency variant of {@link flush} for the page-hide/unload path: emits the
+   * buffered tail but skips checksum computation so the durable write finishes
+   * in the tiny window the browser gives before destroying the page. Normal 30s
+   * chunks are unaffected; this only runs when the page is being hidden/closed.
+   */
+  flushTail(): void {
+    if (this.recorder && this.recorder.state === "recording") {
+      this.tailFast = true;
       this.recorder.requestData();
     }
   }

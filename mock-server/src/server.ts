@@ -21,6 +21,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const MAX_CHUNK_BYTES = 25 * 1024 * 1024; // 25MB per chunk upload
 
+// Console logging for every server-side operation.
+function log(op: string, details?: Record<string, unknown>): void {
+  // eslint-disable-next-line no-console
+  console.log(`[mock-server] ${op}`, details ? JSON.stringify(details) : "");
+}
+
 export function createServer(dataDir: string) {
   const store = new SessionStore(dataDir);
   const app = express();
@@ -39,6 +45,7 @@ export function createServer(dataDir: string) {
   function sendError(res: Response, err: unknown): void {
     if (err instanceof ProtocolError) {
       const spec = ERROR_CODES[err.code];
+      log("error", { code: err.code, message: err.message, httpStatus: spec.httpStatus });
       res.status(spec.httpStatus).json({
         ...envelope(),
         error: { code: err.code, message: err.message, retryable: spec.retryable },
@@ -46,6 +53,11 @@ export function createServer(dataDir: string) {
       return;
     }
     const spec = ERROR_CODES.INTERNAL_UPLOAD_ERROR;
+    log("error", {
+      code: "INTERNAL_UPLOAD_ERROR",
+      message: err instanceof Error ? err.message : "Internal error",
+      httpStatus: spec.httpStatus,
+    });
     res.status(spec.httpStatus).json({
       ...envelope(),
       error: {
@@ -60,6 +72,7 @@ export function createServer(dataDir: string) {
   app.post("/sessions/start", async (_req: Request, res: Response) => {
     try {
       const session = await store.startSession();
+      log("startSession", { sessionId: session.sessionId });
       res.status(201).json({ ...envelope(), session });
     } catch (err) {
       sendError(res, err);
@@ -74,6 +87,7 @@ export function createServer(dataDir: string) {
         throw new ProtocolError("BAD_REQUEST", "lastKnownSegmentIndex is required");
       }
       const result = store.resumeSession(req.params.sessionId);
+      log("resumeSession", { sessionId: req.params.sessionId, resumable: result.resumable });
       res.status(200).json({ ...envelope(), ...result });
     } catch (err) {
       sendError(res, err);
@@ -84,6 +98,7 @@ export function createServer(dataDir: string) {
   app.get("/sessions/:sessionId/checkpoint", (req: Request, res: Response) => {
     try {
       const checkpoint = store.getCheckpoint(req.params.sessionId);
+      log("getCheckpoint", { sessionId: req.params.sessionId, status: checkpoint.status });
       res.status(200).json({ ...envelope(), checkpoint });
     } catch (err) {
       sendError(res, err);
@@ -112,6 +127,13 @@ export function createServer(dataDir: string) {
         }
 
         const ack = await store.acceptChunk(req.params.sessionId, meta, req.file.buffer);
+        log("acceptChunk", {
+          sessionId: req.params.sessionId,
+          segmentIndex: meta.segmentIndex,
+          chunkIndex: meta.chunkIndex,
+          sizeBytes: meta.sizeBytes,
+          duplicate: ack.duplicate,
+        });
         res.status(200).json({ ...envelope(), ack });
       } catch (err) {
         sendError(res, err);
@@ -132,6 +154,13 @@ export function createServer(dataDir: string) {
         body.expectedLastChunkIndexBySegment ?? {},
         body.idempotencyKey,
       );
+      log("completeSession", {
+        sessionId: req.params.sessionId,
+        status: summary.status,
+        receivedSegments: summary.receivedSegments,
+        receivedChunksTotal: summary.receivedChunksTotal,
+        missingChunks: summary.missingChunks.length,
+      });
       res.status(200).json({ ...envelope(), ...summary });
     } catch (err) {
       sendError(res, err);

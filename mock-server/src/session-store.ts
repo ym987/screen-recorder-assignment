@@ -3,12 +3,13 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
   CHECKSUM_ALGO,
   SESSION_TTL,
+  makeIdempotencyKey,
   type ChunkAck,
   type ChunkMetadata,
   type CheckpointModel,
@@ -291,17 +292,25 @@ export class SessionStore {
     const manifest = {
       session: rec.session,
       lastAcceptedChunkIndexBySegment: rec.lastAcceptedChunkIndexBySegment,
+      // Store the full metadata so hydrate() can fully rebuild the chunks map
+      // (idempotency + received counts) after a restart.
       chunks: Object.values(rec.chunks).map((c) => ({
-        segmentIndex: c.meta.segmentIndex,
-        chunkIndex: c.meta.chunkIndex,
-        sizeBytes: c.meta.sizeBytes,
-        mimeType: c.meta.mimeType,
-        checksum: c.meta.checksum,
+        meta: c.meta,
         serverStoredAt: c.serverStoredAt,
       })),
     };
-    await writeFile(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
-    await writeFile(join(dir, "checkpoint.json"), JSON.stringify(this.buildCheckpoint(rec), null, 2), "utf8");
+    await this.writeFileAtomic(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
+    await this.writeFileAtomic(
+      join(dir, "checkpoint.json"),
+      JSON.stringify(this.buildCheckpoint(rec), null, 2),
+    );
+  }
+
+  /** Write via a temp file + rename so a crash can't leave a half-written JSON. */
+  private async writeFileAtomic(path: string, contents: string): Promise<void> {
+    const tmp = `${path}.tmp`;
+    await writeFile(tmp, contents, "utf8");
+    await rename(tmp, path);
   }
 
   private async persistChunk(sessionId: string, meta: ChunkMetadata, blob: Buffer): Promise<void> {
@@ -309,6 +318,32 @@ export class SessionStore {
     await mkdir(dir, { recursive: true });
     const ext = meta.mimeType.includes("webm") ? "webm" : "bin";
     await writeFile(join(dir, `chunk-${meta.chunkIndex}.${ext}`), blob);
+  }
+
+  /**
+   * Rebuild the in-memory chunks map (keyed by idempotencyKey) from a manifest,
+   * so idempotency detection and received-chunk counts survive a restart.
+   * Handles both the current shape ({ meta, serverStoredAt }) and the legacy
+   * flat shape ({ segmentIndex, chunkIndex, ... }) written by older versions.
+   */
+  private rebuildChunks(sessionId: string, rawChunks: unknown): Record<string, StoredChunk> {
+    const chunks: Record<string, StoredChunk> = {};
+    if (!Array.isArray(rawChunks)) return chunks;
+    for (const entry of rawChunks) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const meta = (e.meta ?? e) as Partial<ChunkMetadata>;
+      if (typeof meta.segmentIndex !== "number" || typeof meta.chunkIndex !== "number") continue;
+      const idempotencyKey =
+        typeof meta.idempotencyKey === "string"
+          ? meta.idempotencyKey
+          : makeIdempotencyKey(sessionId, meta.segmentIndex, meta.chunkIndex);
+      chunks[idempotencyKey] = {
+        meta: { ...(meta as ChunkMetadata), sessionId, idempotencyKey },
+        serverStoredAt: typeof e.serverStoredAt === "string" ? e.serverStoredAt : nowIso(),
+      };
+    }
+    return chunks;
   }
 
   /** Load any persisted sessions from disk into memory (best-effort). */
@@ -324,7 +359,7 @@ export class SessionStore {
         const rec: SessionRecord = {
           session: raw.session,
           lastAcceptedChunkIndexBySegment: raw.lastAcceptedChunkIndexBySegment ?? {},
-          chunks: {},
+          chunks: this.rebuildChunks(raw.session.sessionId, raw.chunks),
           completeResults: {},
         };
         this.sessions.set(rec.session.sessionId, rec);

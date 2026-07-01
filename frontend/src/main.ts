@@ -22,6 +22,17 @@ function resolveBaseUrl(): string {
 const BASE_URL = resolveBaseUrl();
 const CLIENT_ID = "browser-" + Math.random().toString(36).slice(2, 10);
 
+// Console logging for every client-side operation.
+function log(op: string, details?: unknown): void {
+  if (details !== undefined) {
+    // eslint-disable-next-line no-console
+    console.log(`[recorder] ${op}`, details);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[recorder] ${op}`);
+  }
+}
+
 const store = new Store();
 const idb = new Idb();
 const api = new ApiClient(BASE_URL);
@@ -89,6 +100,21 @@ async function onChunkCreated(chunk: CreatedChunk): Promise<void> {
   lastChunkIndexBySegment[String(chunk.meta.segmentIndex)] = chunk.meta.chunkIndex;
   const s = store.getState();
   store.update({ chunksCreated: s.chunksCreated + 1 }, "chunk_created");
+  log("chunkCreated", {
+    segmentIndex: chunk.meta.segmentIndex,
+    chunkIndex: chunk.meta.chunkIndex,
+    sizeBytes: chunk.meta.sizeBytes,
+    checksumPending: Boolean(chunk.checksumPending),
+  });
+
+  if (chunk.checksumPending) {
+    // Emergency tail flush (page hidden/closing): take the shortest durable path
+    // so the write can finish before the page dies -- persist the blob + session
+    // and skip checksum (deferred to recovery) and storage-pressure evaluation.
+    await queue.enqueue(chunk.meta, chunk.blob, true);
+    await persistLocalSession();
+    return;
+  }
 
   await persistLocalSession();
   await queue.enqueue(chunk.meta, chunk.blob);
@@ -126,6 +152,7 @@ async function handleStart(): Promise<void> {
   setButtons(false, false);
   try {
     const captureMode = selectedCaptureMode();
+    log("handleStart", { captureMode });
     const local = await idb.getSession();
     if (local) {
       const resumed = await tryResume(local);
@@ -155,6 +182,15 @@ async function startFreshSession(captureMode: CaptureMode = "microphone"): Promi
   currentSessionId = session.sessionId;
   currentSegmentIndex = 0;
   for (const k of Object.keys(lastChunkIndexBySegment)) delete lastChunkIndexBySegment[k];
+  // Reset per-session counters so a brand-new call starts counting from zero.
+  store.update({
+    chunksCreated: 0,
+    chunksUploaded: 0,
+    chunksDuplicate: 0,
+    chunksFailed: 0,
+    pending: 0,
+  });
+  log("startFreshSession", { sessionId: session.sessionId });
 }
 
 /** Resume an existing local session; returns false if server rejects it. */
@@ -172,10 +208,12 @@ async function tryResume(local: LocalSessionState): Promise<boolean> {
     queue.resume();
     store.transition("recovered");
     store.update({ message: "שוחזרה שיחה קיימת — ממשיך ב-segment חדש" }, "resumed");
+    log("tryResume:success", { sessionId: local.sessionId, segmentIndex: currentSegmentIndex });
     return true;
   } catch {
     // Session expired / not resumable -> caller starts fresh.
     await idb.clearSession();
+    log("tryResume:rejected", { sessionId: local.sessionId });
     return false;
   }
 }
@@ -183,6 +221,7 @@ async function tryResume(local: LocalSessionState): Promise<boolean> {
 async function handleStop(): Promise<void> {
   setButtons(false, false);
   try {
+    log("handleStop", { sessionId: currentSessionId });
     if (recorder.isRecording) {
       store.update({ message: "עוצר ומבצע flush אחרון..." });
       await recorder.stop();
@@ -208,12 +247,21 @@ async function handleStop(): Promise<void> {
         { message: `הושלם: ${summary.receivedChunksTotal} chunks ב-${summary.receivedSegments} segments` },
         "completed",
       );
+      log("completeSession:success", {
+        sessionId: currentSessionId,
+        receivedChunksTotal: summary.receivedChunksTotal,
+        receivedSegments: summary.receivedSegments,
+      });
     } else {
       store.transition("error");
       store.update(
         { message: `הושלם חלקית — חסרים ${summary.missingChunks.length} chunks`, lastError: "missing chunks" },
         "error",
       );
+      log("completeSession:partial", {
+        sessionId: currentSessionId,
+        missingChunks: summary.missingChunks.length,
+      });
     }
 
     await idb.clearSessionData(currentSessionId);
@@ -251,6 +299,7 @@ async function handleNewSession(): Promise<void> {
   setButtons(false, false);
   setNewButton(false);
   try {
+    log("handleNewSession", { previousSessionId: currentSessionId });
     if (recorder?.isRecording) await recorder.stop();
 
     // Drop the recovered session's local queue + metadata so nothing from the
@@ -291,6 +340,7 @@ async function recoverOnLoad(): Promise<void> {
   await queue.cleanup();
   const local = await idb.getSession();
   if (!local) return;
+  log("recoverOnLoad", { sessionId: local.sessionId, segmentIndex: local.segmentIndex });
   try {
     const result = await api.resumeSession(
       local.sessionId,
@@ -324,6 +374,19 @@ async function reconcileAndDrain(checkpoint: CheckpointModel): Promise<void> {
 function boot(): void {
   store.subscribe(() => render());
 
+  // Log every state-store event (covers events emitted from the upload queue too).
+  store.subscribe((snapshot, event) => {
+    if (!event) return;
+    log(`event:${event}`, {
+      state: snapshot.state,
+      created: snapshot.chunksCreated,
+      uploaded: snapshot.chunksUploaded,
+      duplicate: snapshot.chunksDuplicate,
+      failed: snapshot.chunksFailed,
+      pending: snapshot.pending,
+    });
+  });
+
   // Opened as file:// -> the server (uploads) isn't reachable and the microphone
   // may be blocked, but screen capture (getDisplayMedia) still works. So we no
   // longer disable everything here; we just surface a non-blocking note and let
@@ -355,12 +418,13 @@ function boot(): void {
   // Persist the in-progress recording tail if the page is hidden or closed, so
   // the audio buffered since the last 30s boundary isn't lost on reload/close.
   // visibilitychange (hidden) / pagehide fire before the page is destroyed and
-  // give IndexedDB the best chance to finish the write (best-effort).
+  // give IndexedDB the best chance to finish the write (best-effort). flushTail()
+  // skips checksum so the write is short enough to actually complete in time.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden" && recorder?.isRecording) recorder.flush();
+    if (document.visibilityState === "hidden" && recorder?.isRecording) recorder.flushTail();
   });
   window.addEventListener("pagehide", () => {
-    if (recorder?.isRecording) recorder.flush();
+    if (recorder?.isRecording) recorder.flushTail();
   });
   // Guard against an accidental reload/close while recording is active.
   window.addEventListener("beforeunload", (e) => {

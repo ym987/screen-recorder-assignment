@@ -2,6 +2,7 @@
 // retention (delete blob on ACK + tombstone) and checkpoint reconcile.
 
 import { RETENTION, RETRY_POLICY, type CheckpointModel, type ChunkMetadata } from "../../shared/contract.js";
+import { sha256Hex } from "./checksum.js";
 import { ChunkUploader, UploadError } from "./chunk-uploader.js";
 import { Idb, type StoredChunkRecord } from "./idb.js";
 import { Store } from "./state/store.js";
@@ -24,7 +25,7 @@ export class UploadQueue {
   ) {}
 
   /** Persist a new chunk and trigger processing. */
-  async enqueue(meta: ChunkMetadata, blob: Blob): Promise<void> {
+  async enqueue(meta: ChunkMetadata, blob: Blob, checksumPending = false): Promise<void> {
     const record: StoredChunkRecord = {
       idempotencyKey: meta.idempotencyKey,
       meta,
@@ -32,6 +33,7 @@ export class UploadQueue {
       status: "pending",
       attempts: 0,
       createdAt: Date.now(),
+      checksumPending,
     };
     await this.idb.putChunk(record);
     await this.refreshPendingCount();
@@ -106,6 +108,15 @@ export class UploadQueue {
           break;
         }
         const record = pending[0];
+        // A chunk saved via the emergency tail-flush has no checksum yet; compute
+        // it now (calmly, on the recovery path) before uploading, since the
+        // server validates the blob against meta.checksum.
+        if (record.checksumPending || !record.meta.checksum) {
+          const buf = await record.blob.arrayBuffer();
+          record.meta = { ...record.meta, checksum: await sha256Hex(buf) };
+          record.checksumPending = false;
+          await this.idb.putChunk(record);
+        }
         this.store.transition("uploading");
         this.store.update({ message: `מעלה chunk ${record.meta.chunkIndex} (segment ${record.meta.segmentIndex})` });
 

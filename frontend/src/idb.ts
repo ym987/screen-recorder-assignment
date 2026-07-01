@@ -19,6 +19,9 @@ export interface StoredChunkRecord {
   status: ChunkStatus;
   attempts: number;
   createdAt: number;
+  // Set when the chunk was saved via the emergency tail-flush without a
+  // checksum; the queue computes it from the stored blob before uploading.
+  checksumPending?: boolean;
 }
 
 export interface LocalSessionState {
