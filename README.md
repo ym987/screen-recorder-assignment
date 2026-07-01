@@ -1,123 +1,124 @@
 # Audio Chunk Upload
 
-מערכת MVP להקלטת אודיו והעלאתה לשרת ב-**chunkים של 30 שניות**, עם מנגנוני
-**Retry**, **Resume** ו-**Idempotency** לעמידות רשת גבוהה. הלקוח נכתב ב-Vanilla
-TypeScript (ללא framework) והשרת הוא Mock Server מבוסס Node/Express לאימות הפרוטוקול.
+An MVP system for recording audio and uploading it to a server in **30-second chunks**, with
+**Retry**, **Resume**, and **Idempotency** mechanisms for high network resilience. The client is
+written in Vanilla TypeScript (no framework) and the server is a Mock Server based on
+Node/Express for protocol validation.
 
-## תכולה עיקרית
+## Key Features
 
-- **הקלטה מתמשכת** – `MediaRecorder` מייצר chunk כל 30 שניות.
-- **תור העלאה מתמיד** – התור נשמר ב-IndexedDB (Blob + מטא-דאטה + checkpoint), כך
-  שרענון דף או נפילת רשת אינם מאבדים נתונים.
-- **Retry אקספוננציאלי** – backoff `1s, 2s, 4s, 8s, 16s`, עד 7 ניסיונות ל-chunk,
-  timeout של 20s לניסיון, ו-circuit breaker אחרי 5 כשלים רצופים.
-- **Resume אחרי refresh** – שחזור לפי `sessionId`, פתיחת `segment` חדש והמשך
-  העלאה מנקודת ה-checkpoint.
-- **Idempotency + Checksum** – כל chunk נושא `idempotencyKey` ו-`sha256`, והשרת
-  מאמת סדר ו-checksum לפני ACK.
-- **Complete barrier** – סגירת session מתאפשרת רק לאחר ACK לכל ה-chunks.
-- **מדיניות אחסון** – soft limit של 150MB (אזהרה) ו-hard limit של 300MB (השהיית
-  הרקורדר עד ששחרור מקום).
+- **Continuous recording** – `MediaRecorder` produces a chunk every 30 seconds.
+- **Persistent upload queue** – The queue is stored in IndexedDB (Blob + metadata + checkpoint),
+  so page refreshes or network drops do not lose data.
+- **Exponential retry** – backoff `1s, 2s, 4s, 8s, 16s`, up to 7 attempts per chunk,
+  20s timeout per attempt, and a circuit breaker after 5 consecutive failures.
+- **Resume after refresh** – Recovery by `sessionId`, opening a new `segment` and continuing
+  the upload from the checkpoint.
+- **Idempotency + Checksum** – Every chunk carries an `idempotencyKey` and `sha256`; the server
+  validates order and checksum before sending ACK.
+- **Complete barrier** – Closing a session is only allowed after ACK for all chunks.
+- **Storage policy** – soft limit of 150 MB (warning) and hard limit of 300 MB (recorder is
+  paused until space is freed).
 
-## מבנה הפרויקט
+## Project Structure
 
 ```
-shared/contract.ts       חוזה נתונים משותף בין לקוח לשרת (envelopes, models, policies)
-frontend/                לקוח Vanilla TS
-  index.html             מעטפת HTML
+shared/contract.ts       Shared data contract between client and server (envelopes, models, policies)
+frontend/                Vanilla TS client
+  index.html             HTML shell
   src/
-    main.ts              חיווט UI <-> שירותים, recovery, complete barrier
-    recording-controller.ts  עטיפת MediaStream/MediaRecorder, יצירת chunkים
-    upload-queue.ts      תור העלאה מתמיד (IndexedDB)
-    chunk-uploader.ts    העלאה עם retry/timeout/idempotency
-    api-client.ts        קריאות REST לשרת
-    checksum.ts          חישוב sha256
-    idb.ts               שכבת IndexedDB
-    storage-guard.ts     בקרת מגבלות אחסון מקומי
-    state/store.ts       State store קטן מבוסס אירועים
+    main.ts              UI <-> services wiring, recovery, complete barrier
+    recording-controller.ts  MediaStream/MediaRecorder wrapper, chunk creation
+    upload-queue.ts      Persistent upload queue (IndexedDB)
+    chunk-uploader.ts    Upload with retry/timeout/idempotency
+    api-client.ts        REST calls to the server
+    checksum.ts          sha256 computation
+    idb.ts               IndexedDB layer
+    storage-guard.ts     Local storage limit enforcement
+    state/store.ts       Small event-based state store
 mock-server/src/
   server.ts              Express endpoints (start/resume/checkpoint/chunk/complete)
-  session-store.ts       ניהול sessions, checkpoints, ולידציית פרוטוקול
+  session-store.ts       Session management, checkpoints, protocol validation
 scripts/
-  build.ts               בניית dist/index.html יחיד (JS inline)
-  dev.ts                 dev runner: לקוח + שרת על אותו origin :3000 (rebuild חי)
-tests/                   בדיקות unit + integration (Vitest)
+  build.ts               Builds a single dist/index.html (JS inlined)
+  dev.ts                 Dev runner: client + server on the same origin :3000 (live rebuild)
+tests/                   Unit + integration tests (Vitest)
 ```
 
 ## API
 
-| Method | Endpoint | תיאור |
+| Method | Endpoint | Description |
 | --- | --- | --- |
-| `POST` | `/sessions/start` | יצירת session חדש (status=active) |
-| `POST` | `/sessions/{id}/resume` | חידוש session קיים + החזרת checkpoint |
-| `GET`  | `/sessions/{id}/checkpoint` | קבלת מצב ה-checkpoint הנוכחי |
-| `POST` | `/sessions/{id}/chunks` | העלאת chunk (`multipart`: `meta` JSON + `blob`) |
-| `POST` | `/sessions/{id}/complete` | סגירת session + סיכום קבלה |
+| `POST` | `/sessions/start` | Create a new session (status=active) |
+| `POST` | `/sessions/{id}/resume` | Resume an existing session + return checkpoint |
+| `GET`  | `/sessions/{id}/checkpoint` | Get the current checkpoint state |
+| `POST` | `/sessions/{id}/chunks` | Upload a chunk (`multipart`: `meta` JSON + `blob`) |
+| `POST` | `/sessions/{id}/complete` | Close the session + receipt summary |
 
-## דרישות מקדימות
+## Prerequisites
 
-- Node.js 18+ (מומלץ 20+)
+- Node.js 18+ (20+ recommended)
 - npm
 
-## התקנה
+## Installation
 
 ```powershell
 npm install
 ```
 
-## הרצה
+## Running
 
-### מצב פיתוח
+### Development mode
 
-מריץ את הלקוח ואת השרת על אותו origin – `http://localhost:3000`. הלקוח נבנה מחדש
-בכל בקשה כך שעריכות מופיעות ברענון, וההגשה מ-`http://localhost` מספקת secure
-context הנדרש ל-`getUserMedia`:
+Runs the client and server on the same origin – `http://localhost:3000`. The client is rebuilt
+on every request so edits appear on refresh, and serving from `http://localhost` provides the
+secure context required by `getUserMedia`:
 
 ```powershell
 npm run dev
 ```
 
-### בנייה + הרצת שרת
+### Build + run server
 
 ```powershell
 npm start
 ```
 
-הפקודה בונה קובץ `dist/index.html` יחיד ומריצה את השרת.
+This command builds a single `dist/index.html` file and starts the server.
 
-### פקודות נוספות
+### Additional commands
 
 ```powershell
-npm run build     # בניית dist/index.html יחיד (ניתן לפתיחה ב-double-click)
-npm run server    # הרצת השרת במצב watch
-npm run typecheck # בדיקת טיפוסים (tsc --noEmit)
-npm test          # הרצת בדיקות (Vitest)
+npm run build     # Build a single dist/index.html (openable by double-click)
+npm run server    # Run the server in watch mode
+npm run typecheck # Type checking (tsc --noEmit)
+npm test          # Run tests (Vitest)
 npm run test:watch
 ```
 
-## בדיקות
+## Tests
 
-הפרויקט כולל בדיקות unit ו-integration המורצות ב-Vitest:
+The project includes unit and integration tests run with Vitest:
 
 ```powershell
 npm test
 ```
 
 - `tests/unit/` – contract, session-store, store, uploader, upload-queue
-- `tests/integration/` – זרימת record → upload מלאה
+- `tests/integration/` – full record → upload flow
 
-## מגבלות ידועות ומימוש עתידי
+## Known Limitations & Future Work
 
-- **ריבוי טאבים באותו דפדפן אינו מוגן כרגע.** שני טאבים באותו דפדפן חולקים את אותו
-  IndexedDB ואת אותו מפתח session מקומי (`"current"`), ולכן פתיחת שני טאבים
-  והקלטה בשניהם במקביל עלולה לגרום להתנגשות (תור העלאה משותף ומצביע session
-  שנדרס). הצד-שרת עצמו מבודד היטב שני דפדפנים נפרדים — כל session הוא UUID עם
-  רשומה נפרדת — כך ששתי הקלטות במקביל בשני דפדפנים שונים עובדות תקין.
-  הגנת "טאב יחיד" (למשל דרך Web Locks API או BroadcastChannel) נותרה **למימוש
-  עתידי**.
+- **Multiple tabs in the same browser are not currently protected.** Two tabs in the same browser
+  share the same IndexedDB and the same local session key (`"current"`), so opening two tabs and
+  recording in both simultaneously may cause conflicts (shared upload queue and an overwritten
+  session pointer). The server side itself properly isolates two separate browsers — each session
+  is a UUID with a separate record — so two simultaneous recordings in two different browsers work
+  correctly. Single-tab enforcement (e.g. via the Web Locks API or BroadcastChannel) remains
+  **future work**.
 
-## הערות
+## Notes
 
-- כשהלקוח מוגש מהשרת (same origin) אין CORS; כשנפתח כקובץ מקומי (`file://`)
-  הוא פונה ל-`http://localhost:3000`.
-- ניתן לעקוף את כתובת ה-API בעזרת `window.__API_BASE__`.
+- When the client is served from the server (same origin) there is no CORS; when opened as a
+  local file (`file://`) it points to `http://localhost:3000`.
+- The API base URL can be overridden via `window.__API_BASE__`.
