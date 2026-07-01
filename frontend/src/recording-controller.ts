@@ -73,10 +73,18 @@ export class RecordingController {
   // skip checksum computation to keep the unload-time persistence path short.
   private tailFast = false;
 
+  // True while a recording session is running. Because each chunk is produced by
+  // its own MediaRecorder start/stop cycle, `active` (not the momentary
+  // recorder.state, which flips to "inactive" between chunks) is the source of
+  // truth for "are we recording".
+  private active = false;
+  private chunkTimer: ReturnType<typeof setInterval> | null = null;
+
   private sessionId = "";
   private segmentIndex = 0;
   private chunkIndex = 0;
-  private segmentStartedAt = 0;
+  private mimeType = "audio/webm";
+  private chunkStartedAt = 0;
 
   constructor(opts: RecordingControllerOptions) {
     this.intervalMs = opts.intervalMs ?? CHUNK_INTERVAL_MS;
@@ -88,14 +96,26 @@ export class RecordingController {
   }
 
   get isRecording(): boolean {
-    return this.recorder?.state === "recording";
+    return this.active;
   }
 
   get currentSegmentIndex(): number {
     return this.segmentIndex;
   }
 
-  /** Start a recording segment under the given session/segment. */
+  /**
+   * Start a recording segment under the given session/segment.
+   *
+   * Each chunk is emitted as a **self-contained media file**. Instead of one
+   * long MediaRecorder stream sliced into header-less fragments (where only the
+   * first chunk carries the WebM header), we run a fresh `MediaRecorder`
+   * start/stop cycle every `intervalMs`. Every stop yields a complete container
+   * (its own EBML header + initial keyframe), so any single chunk plays on its
+   * own and a lost chunk never breaks the others.
+   *
+   * Trade-off: cycling the recorder drops a few milliseconds of audio at each
+   * chunk boundary — accepted in exchange for per-chunk independence.
+   */
   async start(
     sessionId: string,
     segmentIndex: number,
@@ -108,9 +128,7 @@ export class RecordingController {
 
     const preference = captureMode === "screen" ? this.displayMimePreference : this.mimePreference;
     this.stream = await this.acquireStream(captureMode);
-    const mimeType = pickMimeType(preference);
-    this.recorder = new MediaRecorder(this.stream, { mimeType });
-    this.segmentStartedAt = Date.now();
+    this.mimeType = pickMimeType(preference);
 
     // When the user ends the screen share from the browser's own control, the
     // capture track fires "ended"; surface it so the app can stop cleanly.
@@ -118,23 +136,12 @@ export class RecordingController {
       track.addEventListener("ended", () => this.onCaptureEnded?.());
     }
 
-    this.recorder.ondataavailable = (ev: BlobEvent) => {
-      if (ev.data && ev.data.size > 0) {
-        const fast = this.tailFast;
-        this.tailFast = false;
-        const p = this.emitChunk(ev.data, mimeType, fast).finally(() => {
-          this.pendingEmits.delete(p);
-        });
-        this.pendingEmits.add(p);
-      }
-    };
-    this.recorder.onerror = (ev: Event) => {
-      const err = (ev as unknown as { error?: Error }).error ?? new Error("MediaRecorder error");
-      this.onError?.(err);
-    };
+    this.active = true;
+    this.startChunkRecorder();
 
-    this.recorder.start(this.intervalMs);
-    return mimeType;
+    // Roll to a new standalone chunk every intervalMs.
+    this.chunkTimer = setInterval(() => this.rollChunk(), this.intervalMs);
+    return this.mimeType;
   }
 
   private async acquireStream(captureMode: CaptureMode): Promise<MediaStream> {
@@ -146,7 +153,52 @@ export class RecordingController {
     return navigator.mediaDevices.getUserMedia({ audio: true });
   }
 
-  private async emitChunk(blob: Blob, mimeType: string, fast = false): Promise<void> {
+  /**
+   * Create and start a fresh MediaRecorder for a single chunk. On stop it emits
+   * one complete media file; if the session is still active it immediately
+   * chains into the next chunk's recorder for near-continuous capture.
+   */
+  private startChunkRecorder(): void {
+    if (!this.stream) return;
+    const recorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
+    this.chunkStartedAt = Date.now();
+
+    recorder.ondataavailable = (ev: BlobEvent) => {
+      if (ev.data && ev.data.size > 0) {
+        const fast = this.tailFast;
+        this.tailFast = false;
+        const startedAt = new Date(this.chunkStartedAt).toISOString();
+        const p = this.emitChunk(ev.data, fast, startedAt).finally(() => {
+          this.pendingEmits.delete(p);
+        });
+        this.pendingEmits.add(p);
+      }
+    };
+    recorder.onstop = () => {
+      // Chain into the next standalone chunk unless the session has stopped.
+      if (this.active) this.startChunkRecorder();
+    };
+    recorder.onerror = (ev: Event) => {
+      const err = (ev as unknown as { error?: Error }).error ?? new Error("MediaRecorder error");
+      this.onError?.(err);
+    };
+
+    this.recorder = recorder;
+    // No timeslice: the whole recording is emitted as one complete blob on stop.
+    recorder.start();
+  }
+
+  /**
+   * Stop the current chunk recorder so it flushes a complete file; its onstop
+   * handler then starts the next one (while the session is still active).
+   */
+  private rollChunk(): void {
+    if (this.recorder && this.recorder.state === "recording") {
+      this.recorder.stop();
+    }
+  }
+
+  private async emitChunk(blob: Blob, fast: boolean, startedAt: string): Promise<void> {
     const index = this.chunkIndex++;
     // Emergency tail flush: skip the (async, CPU-heavy) checksum so the durable
     // write to IndexedDB is as short as possible before the page is destroyed.
@@ -156,7 +208,6 @@ export class RecordingController {
       const buf = await blob.arrayBuffer();
       checksum = await sha256Hex(buf);
     }
-    const startedAt = new Date(this.segmentStartedAt + index * this.intervalMs).toISOString();
     const meta: ChunkMetadata = {
       sessionId: this.sessionId,
       segmentIndex: this.segmentIndex,
@@ -164,7 +215,7 @@ export class RecordingController {
       clientTimestamp: new Date().toISOString(),
       startedAt,
       durationMs: this.intervalMs,
-      mimeType,
+      mimeType: this.mimeType,
       sizeBytes: blob.size,
       checksumAlgo: CHECKSUM_ALGO,
       checksum,
@@ -174,45 +225,47 @@ export class RecordingController {
   }
 
   /**
-   * Force-emit the audio buffered since the last chunk boundary as a chunk,
-   * without stopping the recorder. Used to persist the in-progress tail before
-   * the page is hidden/unloaded so it survives a reload or accidental close.
+   * Force-close the current chunk into a complete, standalone file and keep
+   * recording. Used to persist the in-progress tail before the page is
+   * hidden/unloaded so it survives a reload or accidental close.
    */
   flush(): void {
-    if (this.recorder && this.recorder.state === "recording") {
-      this.recorder.requestData();
-    }
+    this.rollChunk();
   }
 
   /**
-   * Emergency variant of {@link flush} for the page-hide/unload path: emits the
-   * buffered tail but skips checksum computation so the durable write finishes
-   * in the tiny window the browser gives before destroying the page. Normal 30s
-   * chunks are unaffected; this only runs when the page is being hidden/closed.
+   * Emergency variant of {@link flush} for the page-hide/unload path: closes the
+   * current chunk into a complete file but skips checksum computation so the
+   * durable write finishes in the tiny window the browser gives before
+   * destroying the page. The checksum is filled in later, on recovery.
    */
   flushTail(): void {
     if (this.recorder && this.recorder.state === "recording") {
       this.tailFast = true;
-      this.recorder.requestData();
+      this.recorder.stop();
     }
   }
 
   /** Stop recording and flush the final chunk. Resolves after last chunk emitted. */
   async stop(): Promise<void> {
-    const recorder = this.recorder;
-    if (!recorder || recorder.state === "inactive") {
-      await this.flushPending();
-      this.teardown();
-      return;
+    // Prevent the onstop handler from chaining into a new chunk recorder.
+    this.active = false;
+    if (this.chunkTimer) {
+      clearInterval(this.chunkTimer);
+      this.chunkTimer = null;
     }
-    await new Promise<void>((resolve) => {
-      const onStop = () => {
-        recorder.removeEventListener("stop", onStop);
-        resolve();
-      };
-      recorder.addEventListener("stop", onStop);
-      recorder.stop(); // triggers a final dataavailable, then stop
-    });
+
+    const recorder = this.recorder;
+    if (recorder && recorder.state !== "inactive") {
+      await new Promise<void>((resolve) => {
+        const onStop = () => {
+          recorder.removeEventListener("stop", onStop);
+          resolve();
+        };
+        recorder.addEventListener("stop", onStop);
+        recorder.stop(); // triggers a final dataavailable (complete file), then stop
+      });
+    }
     // Ensure the final chunk's pipeline (persist + enqueue) has fully settled
     // before we resolve, so the complete barrier can't run ahead of it.
     await this.flushPending();
@@ -227,6 +280,11 @@ export class RecordingController {
   }
 
   private teardown(): void {
+    this.active = false;
+    if (this.chunkTimer) {
+      clearInterval(this.chunkTimer);
+      this.chunkTimer = null;
+    }
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.recorder = null;

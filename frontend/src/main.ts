@@ -44,6 +44,7 @@ const queue = new UploadQueue(idb, uploader, store, {
 let recorder: RecordingController;
 let currentSessionId: string | null = null;
 let currentSegmentIndex = 0;
+let currentCaptureMode: CaptureMode = "microphone";
 const lastChunkIndexBySegment: Record<string, number> = {};
 let recorderPausedForStorage = false;
 
@@ -152,6 +153,7 @@ async function handleStart(): Promise<void> {
   setButtons(false, false);
   try {
     const captureMode = selectedCaptureMode();
+    currentCaptureMode = captureMode;
     log("handleStart", { captureMode });
     const local = await idb.getSession();
     if (local) {
@@ -391,11 +393,11 @@ function boot(): void {
   // may be blocked, but screen capture (getDisplayMedia) still works. So we no
   // longer disable everything here; we just surface a non-blocking note and let
   // the user record. Failures (e.g. an unreachable server) surface on their own.
-  if (location.protocol === "file:") {
-    store.update({
-      message: "הרצה דרך file:// — הקלטת מסך זמינה. להעלאה לשרת ולמיקרופון הרץ npm start וגש ל-http://localhost:3000",
-    });
-  }
+  // if (location.protocol === "file:") {
+  //   store.update({
+  //     message: "הרצה דרך file:// — הקלטת מסך זמינה. להעלאה לשרת ולמיקרופון הרץ npm start וגש ל-http://localhost:3000",
+  //   });
+  // }
 
   recorder = new RecordingController({
     onChunk: (c) => onChunkCreated(c),
@@ -421,7 +423,17 @@ function boot(): void {
   // give IndexedDB the best chance to finish the write (best-effort). flushTail()
   // skips checksum so the write is short enough to actually complete in time.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden" && recorder?.isRecording) recorder.flushTail();
+    // In screen-capture mode the recorder tab is normally hidden (the user is
+    // looking at the shared surface), so a hide is NOT a sign the page is about
+    // to be destroyed -- flushing here would emit a spurious near-empty chunk at
+    // the very start. Real page teardown is still covered by "pagehide" below.
+    if (
+      document.visibilityState === "hidden" &&
+      recorder?.isRecording &&
+      currentCaptureMode !== "screen"
+    ) {
+      recorder.flushTail();
+    }
   });
   window.addEventListener("pagehide", () => {
     if (recorder?.isRecording) recorder.flushTail();

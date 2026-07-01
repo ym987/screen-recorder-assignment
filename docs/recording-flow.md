@@ -28,7 +28,7 @@
 4. `recorder.start(sessionId, segmentIndex)` — `frontend/src/recording-controller.ts`:
    - `navigator.mediaDevices.getUserMedia({ audio: true })` — גישה למיקרופון.
    - `pickMimeType(...)` — בחירת קידוד נתמך (למשל `audio/webm;codecs=opus`).
-   - `new MediaRecorder(...)` + `recorder.start(intervalMs)` — chunk כל `CHUNK_INTERVAL_MS` (30 שניות).
+   - כל `CHUNK_INTERVAL_MS` (30 שניות) מורץ מחזור `MediaRecorder` חדש (start/stop): כל stop פולט **קובץ מדיה שלם ועצמאי** (עם כותרת WebM וקי-פריים משלו), כך שכל chunk ניתן לנגן בנפרד ואיבוד chunk אחד לא שובר את האחרים.
 5. `persistLocalSession()` → `idb.saveSession(...)` — שמירת מצב מקומי ל-recovery.
 
 צד שרת — `mock-server/src/session-store.ts` → `startSession()`:
