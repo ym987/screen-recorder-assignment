@@ -25,4 +25,16 @@ describe("makeIdempotencyKey", () => {
   it("produces the fixed session|segment|chunk format", () => {
     expect(makeIdempotencyKey("abc", 2, 5)).toBe("session:abc|segment:2|chunk:5");
   });
+
+  it("is deterministic: same inputs always produce the same key", () => {
+    const key1 = makeIdempotencyKey("sess-123", 1, 2);
+    const key2 = makeIdempotencyKey("sess-123", 1, 2);
+    expect(key1).toBe(key2);
+    expect(key1).toBe("session:sess-123|segment:1|chunk:2");
+  });
+
+  it("distinguishes different segment/chunk combinations", () => {
+    expect(makeIdempotencyKey("s", 0, 1)).not.toBe(makeIdempotencyKey("s", 1, 0));
+    expect(makeIdempotencyKey("s", 0, 0)).not.toBe(makeIdempotencyKey("s", 0, 1));
+  });
 });

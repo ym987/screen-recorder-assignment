@@ -45,7 +45,7 @@ function chunk(sessionId: string, segment: number, index: number, body: string) 
     clientTimestamp: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     durationMs: 30000,
-    mimeType: "audio/webm",
+    mimeType: "video/webm",
     sizeBytes: blob.length,
     checksumAlgo: CHECKSUM_ALGO,
     checksum,
@@ -186,6 +186,19 @@ describe("integration: record + upload", () => {
     expect(await queue.pendingCount()).toBe(0);
   });
 
+  it("checksum mismatch is rejected with CHECKSUM_MISMATCH", async () => {
+    const api = new ApiClient(baseUrl);
+    const uploader = new ChunkUploader({ baseUrl, sleep: noSleep });
+    const session = await api.startSession("client-7", ["video/webm"]);
+
+    const c = chunk(session.sessionId, 0, 0, "chunk-0");
+    const badMeta = { ...c.meta, checksum: "0".repeat(64) };
+    await expect(uploader.attempt(badMeta, c.blob)).rejects.toMatchObject({
+      code: "CHECKSUM_MISMATCH",
+      retryable: true,
+    });
+  });
+
   it("complete barrier: queue drains to zero before complete", async () => {
     const api = new ApiClient(baseUrl);
     const uploader = new ChunkUploader({ baseUrl, sleep: noSleep });
@@ -203,7 +216,7 @@ describe("integration: record + upload", () => {
     // Wait for the queue to drain (barrier condition).
     await queue.process();
     for (let i = 0; i < 50 && (await queue.pendingCount()) > 0; i++) {
-      await new Promise((r) => setTimeout(r, 20));
+      await new Promise((r) => setTimeout(r, 10));
     }
     expect(await queue.pendingCount()).toBe(0);
 

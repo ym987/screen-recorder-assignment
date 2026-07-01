@@ -11,7 +11,7 @@ function meta(): ChunkMetadata {
     clientTimestamp: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     durationMs: 30000,
-    mimeType: "audio/webm",
+    mimeType: "video/webm",
     sizeBytes: 3,
     checksumAlgo: CHECKSUM_ALGO,
     checksum: "deadbeef",
@@ -114,5 +114,20 @@ describe("ChunkUploader", () => {
       const form = (call as unknown as [string, { body: FormData }])[1].body;
       expect(JSON.parse(form.get("meta") as string).chunkIndex).toBe(0);
     }
+  });
+
+  it("treats a malformed (non-JSON) 200 response body as a thrown error", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("not-json", { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+    const up = new ChunkUploader({ baseUrl: "http://x", fetchImpl: fetchImpl as never, sleep: noSleep });
+    await expect(up.attempt(meta(), new Blob(["abc"]))).rejects.toThrow();
+  });
+
+  it("treats 401 as non-retryable when there is no error body", async () => {
+    const fetchImpl = vi.fn(async () => new Response("Unauthorized", { status: 401 }));
+    const up = new ChunkUploader({ baseUrl: "http://x", fetchImpl: fetchImpl as never, sleep: noSleep });
+    await expect(up.upload(meta(), new Blob(["abc"]))).rejects.toMatchObject({ retryable: false });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

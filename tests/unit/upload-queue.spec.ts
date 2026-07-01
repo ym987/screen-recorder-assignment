@@ -16,7 +16,7 @@ function meta(segment: number, index: number): ChunkMetadata {
     clientTimestamp: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     durationMs: 30000,
-    mimeType: "audio/webm",
+    mimeType: "video/webm",
     sizeBytes: 3,
     checksumAlgo: CHECKSUM_ALGO,
     checksum: "deadbeef",
@@ -37,12 +37,7 @@ function ackFor(m: ChunkMetadata, duplicate = false): ChunkAck {
   };
 }
 
-const drain = async (queue: UploadQueue) => {
-  await queue.process();
-  for (let i = 0; i < 100 && (await queue.pendingCount()) > 0; i++) {
-    await new Promise((r) => setTimeout(r, 5));
-  }
-};
+const drain = (queue: UploadQueue) => queue.process();
 
 async function clearChunks(store: Idb): Promise<void> {
   for (const c of await store.listAllChunks()) {

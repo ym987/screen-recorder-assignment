@@ -29,7 +29,7 @@ function makeChunk(sessionId: string, segmentIndex: number, chunkIndex: number, 
     clientTimestamp: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     durationMs: 30000,
-    mimeType: "audio/webm",
+    mimeType: "video/webm",
     sizeBytes: blob.length,
     checksumAlgo: CHECKSUM_ALGO,
     checksum,
@@ -88,6 +88,33 @@ describe("SessionStore protocol", () => {
 
   it("throws SESSION_NOT_FOUND for unknown session", () => {
     expect(() => store.getCheckpoint(randomUUID())).toThrow(ProtocolError);
+  });
+
+  it("throws SESSION_NOT_FOUND when accepting a chunk for an unknown session", async () => {
+    const { meta, blob } = makeChunk(randomUUID(), 0, 0, "x");
+    await expect(store.acceptChunk(randomUUID(), meta, blob)).rejects.toMatchObject({
+      code: "SESSION_NOT_FOUND",
+    });
+  });
+
+  it("throws SESSION_NOT_FOUND when resuming an unknown session", () => {
+    expect(() => store.resumeSession(randomUUID())).toThrow(ProtocolError);
+  });
+
+  it("handles multiple segments independently", async () => {
+    const s = await store.startSession();
+    // segment 0: chunks 0 and 1
+    for (let i = 0; i < 2; i++) {
+      const c = makeChunk(s.sessionId, 0, i, `seg0-chunk${i}`);
+      const ack = await store.acceptChunk(s.sessionId, c.meta, c.blob);
+      expect(ack.accepted).toBe(true);
+    }
+    // segment 1: chunk 0 (new segment starts independently from 0)
+    const c1 = makeChunk(s.sessionId, 1, 0, "seg1-chunk0");
+    const ack1 = await store.acceptChunk(s.sessionId, c1.meta, c1.blob);
+    expect(ack1.accepted).toBe(true);
+    expect(ack1.lastAcceptedChunkIndexBySegment["0"]).toBe(1);
+    expect(ack1.lastAcceptedChunkIndexBySegment["1"]).toBe(0);
   });
 
   it("complete reports missing chunks and is idempotent", async () => {
