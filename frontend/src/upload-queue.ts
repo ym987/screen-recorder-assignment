@@ -100,7 +100,6 @@ export class UploadQueue {
     if (this.processing || this.stopped) return;
     this.processing = true;
     try {
-      // eslint-disable-next-line no-constant-condition
       while (!this.stopped) {
         const pending = await this.idb.listPendingChunks();
         if (pending.length === 0) {

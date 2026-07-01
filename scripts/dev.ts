@@ -44,10 +44,12 @@ async function main(): Promise<void> {
     }
   });
 
+  // eslint-disable-next-line no-console
   app.listen(PORT, () => console.log(`[dev] http://localhost:${PORT}`));
 }
 
 main().catch((err) => {
+  // eslint-disable-next-line no-console
   console.error(err);
   process.exit(1);
 });
