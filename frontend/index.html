@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>הקלטה והעלאת Chunkים</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #1e293b;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --err: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        background: var(--panel);
+        border-radius: 16px;
+        padding: 24px;
+        width: 100%;
+        max-width: 560px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+      }
+      h1 { font-size: 20px; margin: 0 0 16px; }
+      .controls { display: flex; gap: 12px; margin-bottom: 20px; }
+      button {
+        flex: 1;
+        padding: 14px;
+        font-size: 16px;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: opacity 0.15s;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      #btnStart { background: var(--ok); color: #052e16; }
+      #btnStop { background: var(--err); color: #450a0a; }
+      .source {
+        margin-bottom: 16px;
+      }
+      .source label {
+        display: block;
+        font-size: 13px;
+        color: var(--muted);
+        margin-bottom: 6px;
+        font-weight: 600;
+      }
+      .source select {
+        width: 100%;
+        padding: 12px;
+        font-size: 15px;
+        border-radius: 10px;
+        border: 1px solid #334155;
+        background: #0f172a;
+        color: var(--text);
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .source select:disabled { opacity: 0.4; cursor: not-allowed; }
+      #btnNew {
+        width: 100%;
+        margin-bottom: 20px;
+        background: var(--accent);
+        color: #052e16;
+      }
+      .state {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 700;
+        background: #334155;
+        text-transform: uppercase;
+      }
+      .state-recording { background: var(--err); color: #fff; }
+      .state-uploading, .state-retrying { background: var(--warn); color: #1c1917; }
+      .state-success, .state-recovered { background: var(--ok); color: #052e16; }
+      .state-error { background: var(--err); color: #fff; }
+      .message { margin: 12px 0; color: var(--muted); min-height: 20px; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-top: 16px;
+      }
+      .stat {
+        background: #0f172a;
+        border-radius: 10px;
+        padding: 12px;
+        text-align: center;
+      }
+      .stat .num { font-size: 22px; font-weight: 700; color: var(--accent); }
+      .stat .lbl { font-size: 12px; color: var(--muted); margin-top: 4px; }
+      .meta { font-size: 12px; color: var(--muted); margin-top: 16px; word-break: break-all; }
+      #banner {
+        display: none;
+        background: var(--warn);
+        color: #1c1917;
+        padding: 10px 14px;
+        border-radius: 10px;
+        margin-bottom: 16px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      #errorBox {
+        display: none;
+        background: #7f1d1d;
+        color: #fecaca;
+        padding: 10px 14px;
+        border-radius: 10px;
+        margin-top: 16px;
+        font-size: 13px;
+        word-break: break-word;
+      }
+      #localFileNotice {
+        display: none;
+        background: #78350f;
+        color: #fde68a;
+        border: 1px solid var(--warn);
+        padding: 12px 14px;
+        border-radius: 10px;
+        margin-bottom: 16px;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      #localFileNotice code {
+        background: #1c1917;
+        color: #fde68a;
+        padding: 2px 6px;
+        border-radius: 6px;
+        direction: ltr;
+        display: inline-block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card" id="app">
+      <h1>🎙️ הקלטה והעלאת Chunkים</h1>
+      <div id="localFileNotice">
+        ⚠️ <strong>פתחת את הקובץ ישירות (דאבל-קליק).</strong><br />
+        במצב זה הדפדפן חוסם את הגישה למיקרופון ולשרת (מגבלת אבטחה של <code>file://</code>),
+        לכן ההקלטה לא תעבוד. לפונקציונליות מלאה הרץ <code>npm start</code>
+        וגש לכתובת <code>http://localhost:3000</code>.
+      </div>
+      <div id="banner">⚠️ אחסון מקומי מתקרב לגבול — ההקלטה עשויה להשהות</div>
+      <div class="source">
+        <label for="captureMode">מקור הקלטה</label>
+        <select id="captureMode">
+          <option value="screen">🖥️ מסך / חלון / טאב</option>
+          <option value="microphone">🎙️ מיקרופון (קול בלבד)</option>
+        </select>
+      </div>
+      <div class="controls">
+        <button id="btnStart">התחל</button>
+        <button id="btnStop">עצור</button>
+      </div>
+      <button id="btnNew" disabled>🆕 שיחה חדשה</button>
+      <div>
+        סטטוס: <span class="state state-idle" id="state">idle</span>
+      </div>
+      <div class="message" id="message">מוכן להקלטה</div>
+      <div class="grid">
+        <div class="stat"><div class="num" id="cCreated">0</div><div class="lbl">נוצרו</div></div>
+        <div class="stat"><div class="num" id="cUploaded">0</div><div class="lbl">הועלו</div></div>
+        <div class="stat"><div class="num" id="cPending">0</div><div class="lbl">בתור</div></div>
+        <div class="stat"><div class="num" id="cDuplicate">0</div><div class="lbl">כפולים</div></div>
+        <div class="stat"><div class="num" id="cFailed">0</div><div class="lbl">נכשלו</div></div>
+        <div class="stat"><div class="num" id="segment">0</div><div class="lbl">segment</div></div>
+      </div>
+      <div class="meta">Session: <span id="sessionId">—</span></div>
+      <div id="errorBox"></div>
+    </div>
+    <script>
+      // Reveal the local-file notice as early as possible (before the bundle runs)
+      // when the page is opened via double-click (file://).
+      if (location.protocol === "file:") {
+        var n = document.getElementById("localFileNotice");
+        if (n) n.style.display = "block";
+      }
+    </script>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
