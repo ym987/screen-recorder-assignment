@@ -16,28 +16,20 @@ export interface CreatedChunk {
 
 /**
  * What the user wants to capture:
- * - "microphone": audio only, via getUserMedia.
  * - "screen": a tab / window / screen (with its audio when available), via
  *   getDisplayMedia. The browser's own picker lets the user choose which
  *   tab, window or the whole screen to share.
  */
-export type CaptureMode = "microphone" | "screen";
+export type CaptureMode = "screen";
 
 export interface RecordingControllerOptions {
   intervalMs?: number;
-  mimePreference?: string[];
   displayMimePreference?: string[];
   onChunk: (chunk: CreatedChunk) => void | Promise<void>;
   onError?: (err: Error) => void;
   /** Called when the user stops the screen share via the browser control. */
   onCaptureEnded?: () => void;
 }
-
-const DEFAULT_MIME_PREFERENCE = [
-  "audio/webm;codecs=opus",
-  "audio/webm",
-  "audio/ogg;codecs=opus",
-];
 
 const DEFAULT_DISPLAY_MIME_PREFERENCE = [
   "video/webm;codecs=vp9,opus",
@@ -53,14 +45,13 @@ export function pickMimeType(preference: string[]): string {
       if (MediaRecorder.isTypeSupported(m)) return m;
     }
   }
-  return preference[0] ?? "audio/webm";
+  return preference[0] ?? "video/webm";
 }
 
 export class RecordingController {
   private stream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
   private intervalMs: number;
-  private mimePreference: string[];
   private displayMimePreference: string[];
   private onChunk: (chunk: CreatedChunk) => void | Promise<void>;
   private onError?: (err: Error) => void;
@@ -91,7 +82,6 @@ export class RecordingController {
 
   constructor(opts: RecordingControllerOptions) {
     this.intervalMs = opts.intervalMs ?? CHUNK_INTERVAL_MS;
-    this.mimePreference = opts.mimePreference ?? DEFAULT_MIME_PREFERENCE;
     this.displayMimePreference = opts.displayMimePreference ?? DEFAULT_DISPLAY_MIME_PREFERENCE;
     this.onChunk = opts.onChunk;
     this.onError = opts.onError;
@@ -123,13 +113,13 @@ export class RecordingController {
     sessionId: string,
     segmentIndex: number,
     startChunkIndex = 0,
-    captureMode: CaptureMode = "microphone",
+    captureMode: CaptureMode = "screen",
   ): Promise<string> {
     this.sessionId = sessionId;
     this.segmentIndex = segmentIndex;
     this.chunkIndex = startChunkIndex;
 
-    const preference = captureMode === "screen" ? this.displayMimePreference : this.mimePreference;
+    const preference = this.displayMimePreference;
     this.stream = await this.acquireStream(captureMode);
     this.mimeType = pickMimeType(preference);
 
@@ -147,13 +137,10 @@ export class RecordingController {
     return this.mimeType;
   }
 
-  private async acquireStream(captureMode: CaptureMode): Promise<MediaStream> {
-    if (captureMode === "screen") {
-      // The browser picker lets the user choose a tab, a window or the whole
-      // screen, and (where supported) share that source's audio too.
-      return navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    }
-    return navigator.mediaDevices.getUserMedia({ audio: true });
+  private async acquireStream(_captureMode: CaptureMode): Promise<MediaStream> {
+    // The browser picker lets the user choose a tab, a window or the whole
+    // screen, and (where supported) share that source's audio too.
+    return navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
   }
 
   /**

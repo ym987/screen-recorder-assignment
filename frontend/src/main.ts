@@ -44,7 +44,7 @@ const queue = new UploadQueue(idb, uploader, store, {
 let recorder: RecordingController;
 let currentSessionId: string | null = null;
 let currentSegmentIndex = 0;
-let currentCaptureMode: CaptureMode = "microphone";
+let currentCaptureMode: CaptureMode = "screen";
 const lastChunkIndexBySegment: Record<string, number> = {};
 let recorderPausedForStorage = false;
 
@@ -54,22 +54,14 @@ let recorderPausedForStorage = false;
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 
-function selectedCaptureMode(): CaptureMode {
-  const value = ($("captureMode") as HTMLSelectElement).value;
-  return value === "screen" ? "screen" : "microphone";
-}
-
-function mimePreferenceFor(mode: CaptureMode): string[] {
-  return mode === "screen"
-    ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
-    : ["audio/webm;codecs=opus", "audio/webm"];
+function mimePreferenceFor(_mode: CaptureMode): string[] {
+  return ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 }
 
 function setButtons(startEnabled: boolean, stopEnabled: boolean): void {
   ($("btnStart") as HTMLButtonElement).disabled = !startEnabled;
   ($("btnStop") as HTMLButtonElement).disabled = !stopEnabled;
-  // The source can only be changed while not actively recording.
-  ($("captureMode") as HTMLSelectElement).disabled = !startEnabled;
+
 }
 
 function setNewButton(enabled: boolean): void {
@@ -152,7 +144,7 @@ async function applyStoragePressure(): Promise<void> {
 async function handleStart(): Promise<void> {
   setButtons(false, false);
   try {
-    const captureMode = selectedCaptureMode();
+    const captureMode: CaptureMode = "screen";
     currentCaptureMode = captureMode;
     log("handleStart", { captureMode });
     const local = await idb.getSession();
@@ -179,7 +171,7 @@ async function handleStart(): Promise<void> {
   }
 }
 
-async function startFreshSession(captureMode: CaptureMode = "microphone"): Promise<void> {
+async function startFreshSession(captureMode: CaptureMode = "screen"): Promise<void> {
   const session = await api.startSession(CLIENT_ID, mimePreferenceFor(captureMode));
   currentSessionId = session.sessionId;
   currentSegmentIndex = 0;
@@ -389,10 +381,8 @@ function boot(): void {
     });
   });
 
-  // Opened as file:// -> the server (uploads) isn't reachable and the microphone
-  // may be blocked, but screen capture (getDisplayMedia) still works. So we no
-  // longer disable everything here; we just surface a non-blocking note and let
-  // the user record. Failures (e.g. an unreachable server) surface on their own.
+  // Opened as file:// -> the server (uploads) isn't reachable but screen capture
+  // (getDisplayMedia) still works. We just let the user record; failures surface on their own.
   // if (location.protocol === "file:") {
   //   store.update({
   //     message: "הרצה דרך file:// — הקלטת מסך זמינה. להעלאה לשרת ולמיקרופון הרץ npm start וגש ל-http://localhost:3000",
